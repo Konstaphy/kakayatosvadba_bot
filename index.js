@@ -1,35 +1,59 @@
 const express = require('express');
 const { Telegraf } = require('telegraf');
-const bodyParser = require('body-parser');
-const cors = require('cors'); // Если фронт на другом домене
-require('dotenv').config();
+const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+// Для Vercel переменные окружения будут автоматически доступны
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 
 // Проверка переменных окружения
-if (!BOT_TOKEN) {
-    console.error('Ошибка: BOT_TOKEN должен быть указан в .env файле');
-    process.exit(1);
+if (!BOT_TOKEN || !CHAT_ID) {
+    console.error('❌ Ошибка: BOT_TOKEN и CHAT_ID должны быть указаны в переменных окружения Vercel');
+    // Не завершаем процесс на Vercel, чтобы можно было настроить переменные
 }
 
-if (!CHAT_ID) {
-    console.error('Ошибка: CHAT_ID должен быть указан в .env файле');
-    process.exit(1);
+// Инициализация бота только если есть токен
+let bot;
+if (BOT_TOKEN) {
+    bot = new Telegraf(BOT_TOKEN);
+} else {
+    console.warn('⚠️  Бот не инициализирован. Укажите BOT_TOKEN в переменных окружения Vercel');
 }
-
-// Инициализация бота
-const bot = new Telegraf(BOT_TOKEN);
 
 // Middleware
-app.use(cors()); // Разрешаем запросы с других доменов
-app.use(bodyParser.json());
+app.use(cors());
+app.use(express.json());
 
-// Маршрут для отправки сообщения в Telegram
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    if (!BOT_TOKEN || !CHAT_ID) {
+        return res.status(500).json({
+            status: 'error',
+            message: 'BOT_TOKEN или CHAT_ID не настроены. Проверьте переменные окружения в Vercel.'
+        });
+    }
+
+    res.json({
+        status: 'ok',
+        service: 'telegram-bot-api',
+        timestamp: new Date().toISOString(),
+        chatId: CHAT_ID
+    });
+});
+
+// Основной endpoint для отправки сообщений
 app.post('/api/send-message', async (req, res) => {
     try {
+        // Проверка наличия токена
+        if (!BOT_TOKEN || !CHAT_ID) {
+            return res.status(500).json({
+                success: false,
+                error: 'Сервис не настроен. Проверьте переменные окружения.'
+            });
+        }
+
         const { message } = req.body;
 
         // Валидация
@@ -40,88 +64,62 @@ app.post('/api/send-message', async (req, res) => {
             });
         }
 
-        // Отправляем сообщение в указанный чат
+        // Отправляем сообщение
         await bot.telegram.sendMessage(CHAT_ID, message.trim());
 
-        console.log(`Сообщение отправлено в чат ${CHAT_ID}: ${message}`);
+        console.log(`✅ Сообщение отправлено в чат ${CHAT_ID}`);
 
         res.json({
             success: true,
-            message: 'Сообщение успешно отправлено в Telegram',
+            message: 'Сообщение успешно отправлено',
             timestamp: new Date().toISOString()
         });
 
     } catch (error) {
-        console.error('Ошибка при отправке сообщения в Telegram:', error);
+        console.error('❌ Ошибка:', error.message);
 
-        // Более детальные ошибки для отладки
+        let statusCode = 500;
         let errorMessage = error.message;
+
+        // Детализация ошибок Telegram API
         if (error.response) {
-            errorMessage = `Telegram API error: ${error.response.description || error.message}`;
+            errorMessage = error.response.description || error.message;
+            statusCode = 400; // Для ошибок API Telegram
         }
 
-        res.status(500).json({
+        res.status(statusCode).json({
             success: false,
-            error: errorMessage,
-            code: error.code || 'UNKNOWN_ERROR'
+            error: errorMessage
         });
     }
 });
 
-// Проверка соединения с ботом
-app.get('/api/health', async (req, res) => {
-    try {
-        // Проверяем, что бот работает
-        const botInfo = await bot.telegram.getMe();
-
-        res.json({
-            status: 'ok',
-            bot: {
-                username: botInfo.username,
-                first_name: botInfo.first_name,
-                is_bot: botInfo.is_bot
-            },
-            chatId: CHAT_ID,
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        res.status(500).json({
-            status: 'error',
-            error: error.message
-        });
-    }
-});
-
-// Обработка ошибок 404
+// Обработка 404
 app.use('*', (req, res) => {
     res.status(404).json({
         success: false,
-        error: 'Endpoint not found'
+        error: 'Endpoint not found',
+        available: ['GET /api/health', 'POST /api/send-message']
     });
 });
 
-// Запуск бота и сервера
-async function start() {
-    try {
-        // Запускаем бота
-        await bot.launch();
+// Запуск бота (только если токен есть)
+if (bot) {
+    bot.launch().then(() => {
         console.log('🤖 Telegram бот запущен');
-        console.log(`📝 ID чата для отправки: ${CHAT_ID}`);
-
-        // Запускаем сервер
-        app.listen(PORT, () => {
-            console.log(`🚀 Сервер запущен на порту ${PORT}`);
-            console.log(`📤 API endpoint: http://localhost:${PORT}/api/send-message`);
-        });
-
-        // Graceful shutdown
-        process.once('SIGINT', () => bot.stop('SIGINT'));
-        process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-    } catch (error) {
-        console.error('❌ Ошибка при запуске:', error);
-        process.exit(1);
-    }
+    }).catch(err => {
+        console.error('❌ Ошибка запуска бота:', err);
+    });
 }
 
-start();
+// Экспорт для Vercel
+module.exports = app;
+
+// Локальный запуск (для разработки)
+if (require.main === module) {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+        console.log(`🚀 Сервер запущен на порту ${PORT}`);
+        console.log(`📤 API endpoint: http://localhost:${PORT}/api/send-message`);
+    });
+}
