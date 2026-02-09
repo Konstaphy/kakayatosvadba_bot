@@ -2,6 +2,10 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 const cors = require('cors');
 
+if (process.env.NODE_ENV !== "production") {
+    require("dotenv").config();
+}
+
 const app = express();
 
 // Для Vercel переменные окружения будут автоматически доступны
